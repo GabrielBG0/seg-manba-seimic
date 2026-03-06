@@ -1,0 +1,47 @@
+services:
+  mamba-seg:
+    build: .
+    image: seg-mamba-seismic:latest
+    container_name: seg-mamba-seismic
+
+    # ── GPU access ────────────────────────────────────────────────────────────
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all # use all available GPUs; set to 1 to limit
+              capabilities: [ gpu ]
+
+    # ── Port: JupyterLab ─────────────────────────────────────────────────────
+    ports:
+      # Bind to localhost only — access via SSH tunnel (see README)
+      # Never expose JupyterLab directly on 0.0.0.0 on a remote server.
+      - "127.0.0.1:8888:8888"
+
+    # ── Volumes ───────────────────────────────────────────────────────────────
+    volumes:
+      # Dataset: mount your dataset folder as read-only
+      # Change the left side to your actual dataset path on the host.
+      - ./dataset:/workspace/dataset:ro
+
+      # Checkpoints: persisted on the host so they survive container restarts
+      - ./checkpoints:/workspace/checkpoints
+
+      # HuggingFace model cache: avoids re-downloading VMamba weights each run
+      - huggingface-cache:/root/.cache/huggingface
+
+    # ── Environment ───────────────────────────────────────────────────────────
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # Uncomment to point HF cache to the mounted volume explicitly:
+      # - HF_HOME=/root/.cache/huggingface
+
+      # ── Shared memory: needed by DataLoader with num_workers > 0 ─────────────
+    shm_size: "8gb"
+
+    restart: unless-stopped
+
+volumes:
+  huggingface-cache:
