@@ -10,23 +10,23 @@ FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 # ── System packages ──────────────────────────────────────────────────────────
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3.11 \
-        python3.11-dev \
-        python3.11-venv \
-        python3-pip \
-        curl \
-        git \
-        ca-certificates \
-        libglib2.0-0 \
-        libsm6 \
-        libxext6 \
-        libxrender-dev \
-        libgl1 \
-    && rm -rf /var/lib/apt/lists/*
+       python3.11 \
+       python3.11-dev \
+       python3.11-venv \
+       python3-pip \
+       curl \
+       git \
+       ca-certificates \
+       libglib2.0-0 \
+       libsm6 \
+       libxext6 \
+       libxrender-dev \
+       libgl1 \
+       && rm -rf /var/lib/apt/lists/*
 
 # Make python3.11 the default python
 RUN update-alternatives --install /usr/bin/python  python  /usr/bin/python3.11 1 \
- && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+       && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 
 # ── Install uv ───────────────────────────────────────────────────────────────
 RUN curl -Ls https://astral.sh/uv/install.sh | sh
@@ -40,18 +40,21 @@ WORKDIR /workspace
 COPY pyproject.toml ./
 
 RUN uv venv .venv --python python3.11 \
- && uv pip install --python .venv/bin/python \
-        torch torchvision --index-url https://download.pytorch.org/whl/cu124 \
- && uv pip install --python .venv/bin/python \
-        tifffile \
-        Pillow \
-        numpy \
-        scipy \
-        matplotlib \
-        huggingface_hub \
-        jupyterlab \
-        ipywidgets \
-        tqdm
+       && uv pip install --python .venv/bin/python \
+       torch torchvision --index-url https://download.pytorch.org/whl/cu124 \
+       && uv pip install --python .venv/bin/python \
+       tifffile \
+       Pillow \
+       numpy \
+       scipy \
+       matplotlib \
+       pandas \
+       huggingface_hub \
+       lightning \
+       rich \   
+       jupyterlab \
+       ipywidgets \
+       tqdm
 
 # ── Optional: mamba-ssm fast CUDA scan ───────────────────────────────────────
 # Uncomment the block below if you want the ~10-20x faster selective scan.
@@ -68,16 +71,19 @@ ENV PATH="/workspace/.venv/bin:$PATH"
 # ── Copy project source files ─────────────────────────────────────────────────
 COPY mamba_seg_net.py    ./
 COPY pretrained_utils.py ./
+COPY lightning_module.py ./
 COPY seismic_mamba_training.ipynb ./
+COPY train.py ./
+
 
 # ── Jupyter config: disable token auth for local dev ─────────────────────────
 RUN jupyter lab --generate-config \
- && echo "c.ServerApp.token = ''" >> /root/.jupyter/jupyter_lab_config.py \
- && echo "c.ServerApp.password = ''" >> /root/.jupyter/jupyter_lab_config.py \
- && echo "c.ServerApp.open_browser = False" >> /root/.jupyter/jupyter_lab_config.py \
- && echo "c.ServerApp.ip = '0.0.0.0'" >> /root/.jupyter/jupyter_lab_config.py \
- && echo "c.ServerApp.allow_root = True" >> /root/.jupyter/jupyter_lab_config.py \
- && echo "c.ServerApp.disable_check_xsrf = True" >> /root/.jupyter/jupyter_lab_config.py
+       && echo "c.ServerApp.token = ''" >> /root/.jupyter/jupyter_lab_config.py \
+       && echo "c.ServerApp.password = ''" >> /root/.jupyter/jupyter_lab_config.py \
+       && echo "c.ServerApp.open_browser = False" >> /root/.jupyter/jupyter_lab_config.py \
+       && echo "c.ServerApp.ip = '0.0.0.0'" >> /root/.jupyter/jupyter_lab_config.py \
+       && echo "c.ServerApp.allow_root = True" >> /root/.jupyter/jupyter_lab_config.py \
+       && echo "c.ServerApp.disable_check_xsrf = True" >> /root/.jupyter/jupyter_lab_config.py
 
 # ── Expose JupyterLab port ────────────────────────────────────────────────────
 EXPOSE 8888
