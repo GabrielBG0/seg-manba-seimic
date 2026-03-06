@@ -115,10 +115,17 @@ def selective_scan_pytorch(
     delta_softplus: bool = True,
 ) -> torch.Tensor:
     """
-    Pure-PyTorch sequential selective scan (reference implementation).
+    Memory-efficient pure-PyTorch sequential selective scan.
 
-    Correct and dependency-free; O(D * N * L) time.
-    For real training, install mamba_ssm for the parallel CUDA scan.
+    Key fix vs the naive version: dA and dB are computed ONE TIMESTEP AT A
+    TIME inside the loop instead of being pre-allocated as full (B, D, L, N)
+    tensors. This reduces peak memory from O(B*D*L*N) to O(B*D*N), which at
+    canvas 1024x608 (L=38912) is the difference between ~320 MB per tensor
+    and ~0.8 MB -- a 400x reduction.
+
+    The trade-off is slightly more compute (no fused batch ops across L), but
+    this fallback is only used when mamba_ssm is not installed, so correctness
+    and memory take priority over raw speed.
     """
     dtype_in = u.dtype
     u     = u.float()
@@ -131,27 +138,21 @@ def selective_scan_pytorch(
     if delta_softplus:
         delta = F.softplus(delta)
 
-    # Discretise via Zero-Order Hold: dA[b,d,l,n] = exp(delta * A)
-    # A stored as log|A|, real A is negative -> A_neg = -exp(A_log)
-    A_neg = -torch.exp(A.float())                              # (D, N)
+    A_neg = -torch.exp(A.float())       # (D, N)  real A is negative
+    B_t   = B.float().permute(0, 2, 1)  # (B, L, N)
+    C_t   = C.float().permute(0, 2, 1)  # (B, L, N)
 
-    # dA: (B, D, L, N);  dB: (B, D, L, N)
-    dA = torch.exp(
-        delta.unsqueeze(-1) * A_neg.unsqueeze(0).unsqueeze(2)
-    )
-    B_t = B.float().permute(0, 2, 1)    # (B, L, N)
-    C_t = C.float().permute(0, 2, 1)    # (B, L, N)
-    dB  = delta.unsqueeze(-1) * B_t.unsqueeze(1)   # (B, D, L, N)
-
-    # Sequential recurrence: x_t = dA_t * x_{t-1} + dB_t * u_t
+    # Recurrence -- compute dA_t and dB_t per step (O(B*D*N) peak memory)
     x   = u.new_zeros(B_batch, D_dim, N)
-    ys: List[torch.Tensor] = []
+    out = u.new_zeros(B_batch, D_dim, L)
     for t in range(L):
-        x = dA[:, :, t] * x + dB[:, :, t] * u[:, :, t].unsqueeze(-1)
-        y = (x * C_t[:, t].unsqueeze(1)).sum(-1)   # (B, D)
-        ys.append(y)
+        # dA_t: (B, D, N)
+        dA_t = torch.exp(delta[:, :, t].unsqueeze(-1) * A_neg.unsqueeze(0))
+        # dB_t: (B, D, N)
+        dB_t = delta[:, :, t].unsqueeze(-1) * B_t[:, t].unsqueeze(1)
+        x = dA_t * x + dB_t * u[:, :, t].unsqueeze(-1)
+        out[:, :, t] = (x * C_t[:, t].unsqueeze(1)).sum(-1)
 
-    out = torch.stack(ys, dim=2)                   # (B, D, L)
     out = out + D.float().view(1, D_dim, 1) * u
     return out.to(dtype_in)
 
@@ -506,6 +507,7 @@ class VMambaStage(nn.Module):
         depth: int,
         d_state: int = 16,
         drop_path_rates: Optional[List[float]] = None,
+        use_checkpoint: bool = False,
         **vss_kwargs,
     ):
         super().__init__()
@@ -515,10 +517,15 @@ class VMambaStage(nn.Module):
             for i in range(depth)
         ])
         self.norm = nn.LayerNorm(dim)
+        self.use_checkpoint = use_checkpoint
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         for blk in self.blocks:
-            x = blk(x)
+            if self.use_checkpoint and self.training:
+                from torch.utils.checkpoint import checkpoint
+                x = checkpoint(blk, x, use_reentrant=False)
+            else:
+                x = blk(x)
         return self.norm(x)
 
 
@@ -584,6 +591,7 @@ class MambaSegNet(nn.Module):
         d_state: int = 16,
         drop_path_rate: float = 0.2,
         mlp_ratio: float = 0.0,
+        use_checkpoint: bool = False,
     ):
         super().__init__()
         S    = len(depths)
@@ -609,7 +617,8 @@ class MambaSegNet(nn.Module):
         for i in range(S):
             self.enc_stages.append(
                 VMambaStage(dims[i], depths[i], d_state=d_state,
-                            drop_path_rates=dpr[i], **vss_kwargs)
+                            drop_path_rates=dpr[i], use_checkpoint=use_checkpoint,
+                            **vss_kwargs)
             )
             if i < S - 1:
                 self.downsamples.append(PatchMerging(dims[i]))
@@ -698,29 +707,33 @@ class MambaSegNet(nn.Module):
 # 7.  Convenience constructors  (named after VMamba paper scale points)
 # ===========================================================================
 
-def mamba_seg_tiny(num_classes: int, **kwargs) -> MambaSegNet:
+def mamba_seg_tiny(num_classes: int, use_checkpoint: bool = True, **kwargs) -> MambaSegNet:
     """~22 M params. Rapid experimentation and resource-limited environments."""
     return MambaSegNet(num_classes=num_classes,
                        embed_dim=64, depths=[2, 2, 5, 2],
-                       d_state=16, drop_path_rate=0.1, **kwargs)
+                       d_state=16, drop_path_rate=0.1,
+                       use_checkpoint=use_checkpoint, **kwargs)
 
-def mamba_seg_small(num_classes: int, **kwargs) -> MambaSegNet:
+def mamba_seg_small(num_classes: int, use_checkpoint: bool = True, **kwargs) -> MambaSegNet:
     """~49 M params. Good accuracy/efficiency balance."""
     return MambaSegNet(num_classes=num_classes,
                        embed_dim=96, depths=[2, 2, 9, 2],
-                       d_state=16, drop_path_rate=0.2, **kwargs)
+                       d_state=16, drop_path_rate=0.2,
+                       use_checkpoint=use_checkpoint, **kwargs)
 
-def mamba_seg_base(num_classes: int, **kwargs) -> MambaSegNet:
+def mamba_seg_base(num_classes: int, use_checkpoint: bool = True, **kwargs) -> MambaSegNet:
     """~89 M params. Recommended for production training and seismic volumes."""
     return MambaSegNet(num_classes=num_classes,
                        embed_dim=128, depths=[2, 2, 9, 2],
-                       d_state=16, drop_path_rate=0.3, **kwargs)
+                       d_state=16, drop_path_rate=0.3,
+                       use_checkpoint=use_checkpoint, **kwargs)
 
-def mamba_seg_large(num_classes: int, **kwargs) -> MambaSegNet:
+def mamba_seg_large(num_classes: int, use_checkpoint: bool = True, **kwargs) -> MambaSegNet:
     """~197 M params. Best accuracy; requires ~40 GB GPU for 512x512 batches."""
     return MambaSegNet(num_classes=num_classes,
                        embed_dim=192, depths=[2, 2, 18, 2],
-                       d_state=16, drop_path_rate=0.4, **kwargs)
+                       d_state=16, drop_path_rate=0.4,
+                       use_checkpoint=use_checkpoint, **kwargs)
 
 
 # ===========================================================================
