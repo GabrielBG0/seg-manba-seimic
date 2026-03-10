@@ -30,9 +30,9 @@ from lightning_module import SeismicDataModule, MambaSegLightning
 DATASET_ROOT   = Path(os.environ.get("DATASET_ROOT", "dataset"))
 TRAIN_DATA     = DATASET_ROOT / "data"        / "train"
 TRAIN_LABELS   = DATASET_ROOT / "annotations" / "train"
-VAL_DATA       = DATASET_ROOT / "data"        / "val"
+VAL_DATA       = DATASET_ROOT / "images"        / "val"
 VAL_LABELS     = DATASET_ROOT / "annotations" / "val"
-TEST_DATA      = DATASET_ROOT / "data"        / "test"
+TEST_DATA      = DATASET_ROOT / "images"        / "test"
 TEST_LABELS    = DATASET_ROOT / "annotations" / "test"
 
 # Logs and checkpoints go to a shared filesystem visible to all nodes
