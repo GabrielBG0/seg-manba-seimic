@@ -28,7 +28,7 @@ from lightning_module import SeismicDataModule, MambaSegLightning
 # ===========================================================================
 
 DATASET_ROOT   = Path(os.environ.get("DATASET_ROOT", "dataset"))
-TRAIN_DATA     = DATASET_ROOT / "data"        / "train"
+TRAIN_DATA     = DATASET_ROOT / "images"        / "train"
 TRAIN_LABELS   = DATASET_ROOT / "annotations" / "train"
 VAL_DATA       = DATASET_ROOT / "images"        / "val"
 VAL_LABELS     = DATASET_ROOT / "annotations" / "val"
