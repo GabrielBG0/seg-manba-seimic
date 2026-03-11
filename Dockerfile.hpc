@@ -1,14 +1,31 @@
 # =============================================================================
 # MambaSegNet — HPC Training Image
 # =============================================================================
+# Build & push:
+#   docker build -t YOUR_DOCKERHUB_USER/seg-mamba-seismic:latest .
+#   docker push YOUR_DOCKERHUB_USER/seg-mamba-seismic:latest
+#
+# Convert to Singularity on the HPC:
+#   singularity pull seg-mamba-seismic-container.sif docker://YOUR_DOCKERHUB_USER/seg-mamba-seismic:latest
+#
+# Run via SLURM (see submit.sbatch):
+#   singularity exec --nv \
+#       --bind $PROJECT_DIR:/workspace \
+#       seg-mamba-seismic-container.sif \
+#       python /workspace/train.py
+# =============================================================================
 FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 
 # ── System packages ───────────────────────────────────────────────────────────
 ENV DEBIAN_FRONTEND=noninteractive
 
-# FIX: Removed the manual GPG key fetching. 
-# The 12.4.1 base image already has the valid NVIDIA repo configuration.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# The NVIDIA base image ships with apt repo keys that periodically expire.
+# We don't need the NVIDIA apt repo at all — PyTorch and mamba-ssm install
+# via pip wheels and compile against the CUDA toolkit already in the image.
+# Just disable the stale NVIDIA repo and do a plain apt-get update.
+RUN rm -f /etc/apt/sources.list.d/cuda*.list  && apt-get update
+
+RUN apt-get install -y --no-install-recommends \
        python3.11 \
        python3.11-dev \
        python3.11-venv \
@@ -31,14 +48,12 @@ RUN curl -Ls https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:$PATH"
 
 # ── Install dependencies into a system-wide venv ──────────────────────────────
-RUN uv venv /opt/venv --python python3.11
-# Use the VIRTUAL_ENV env var so uv automatically detects the target
-ENV VIRTUAL_ENV=/opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-
-RUN uv pip install \
+# We use /opt/venv (not /workspace) so the venv is baked into the image
+# and does not depend on the bind-mounted project directory.
+RUN uv venv /opt/venv --python python3.11 \
+       && uv pip install --python /opt/venv/bin/python \
        torch torchvision --index-url https://download.pytorch.org/whl/cu124 \
-       && uv pip install \
+       && uv pip install --python /opt/venv/bin/python \
        tifffile \
        Pillow \
        numpy \
@@ -50,15 +65,33 @@ RUN uv pip install \
        rich \
        tqdm
 
-# ── Optional: mamba-ssm ───────────────────────────────────────────────────────
-# Note: causal-conv1d and mamba-ssm often require NVCC to compile during install.
-# Since you are using the -devel base image, this will work fine.
-# RUN uv pip install causal-conv1d mamba-ssm
+# ── mamba-ssm fast CUDA scan ─────────────────────────────────────────────────
+# Replaces the pure-PyTorch fallback (38k-step Python loop) with a fused
+# CUDA kernel — reduces one epoch from ~22 hours to minutes on H100s.
+# The devel base image provides nvcc so compilation works at build time.
+RUN uv pip install --python /opt/venv/bin/python causal-conv1d  && uv pip install --python /opt/venv/bin/python mamba-ssm
 
-# ── Permissions & Path ────────────────────────────────────────────────────────
-# Essential for Singularity/HPC environments
+# ── Activate venv for all subsequent commands ─────────────────────────────────
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# ── Make the venv world-readable ─────────────────────────────────────────────
+# Singularity runs as the invoking user (not root), so the venv must be
+# readable by any user.
 RUN chmod -R a+rX /opt/venv
+
+# ── PYTHONPATH: include /workspace so train.py finds lightning_module.py etc. ─
+# The project files (train.py, lightning_module.py, mamba_seg_net.py,
+# pretrained_utils.py) are NOT copied into the image — they live on the
+# host filesystem and are bind-mounted to /workspace at runtime.
+# This keeps the image small and means you can update scripts without
+# rebuilding the container.
 ENV PYTHONPATH="/workspace:${PYTHONPATH}"
+
+# ── Working directory ─────────────────────────────────────────────────────────
 WORKDIR /workspace
 
+# ── Default entrypoint ────────────────────────────────────────────────────────
+# Singularity ignores ENTRYPOINT/CMD and uses the srun command instead,
+# but this makes the image usable with plain docker run too.
 CMD ["python", "/workspace/train.py"]
